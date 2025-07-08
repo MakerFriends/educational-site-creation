@@ -1,63 +1,82 @@
-# Tests: This workflow assumes your CI passes. Add "statusChecks" if you want to wait for specific checks to pass.
-# Security: Auto-merging from forks is risky. Keep allowForks: false unless you're handling validations elsewhere.
-# Bot Access: GITHUB_TOKEN has limited access; for advanced workflows (e.g., repo in orgs), use a fine-grained PAT.
-
 name: upstream-auto-merge-PR
 
 on:
   pull_request_target:
     types: [opened, synchronize, reopened]
-    
-  workflow_dispatch:  # Allow manual triggering
+
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to test merge logic manually"
+        required: false
 
 jobs:
   auto-merge:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.UPSTREAM_GH_TOKEN }}
-    
-    # env:
-    #   OWNER: ${{ github.repository_owner }}
-    # run: echo ${{ github.repository_owner }}
-    # Prevents execution in forks or untrusted repositories
-    # if: "$OWNER" == "MakerFriends"
 
     permissions:
       pull-requests: write
       contents: write
 
+    env:
+      GH_TOKEN: ${{ secrets.UPSTREAM_GH_TOKEN }}
+
     steps:
       - name: Confirm GH_TOKEN is set
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "❌ GH_TOKEN is missing. Please set the secret correctly."
+            echo "❌ GH_TOKEN is missing. Please set the UPSTREAM_GH_TOKEN secret."
             exit 1
-          else
-            echo "✅ GH_TOKEN appears to be set."
           fi
+          echo "✅ GH_TOKEN is set."
 
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Show auth status
-        run: gh auth status
+
+      - name: Determine PR number
+        id: determine-pr
+        run: |
+          if [ -n "${{ github.event.pull_request.number }}" ]; then
+            echo "PR_NUMBER=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            echo "🧠 Using PR number from event: ${{ github.event.pull_request.number }}"
+          elif [ -n "${{ inputs.pr_number }}" ]; then
+            echo "PR_NUMBER=${{ inputs.pr_number }}" >> "$GITHUB_OUTPUT"
+            echo "🧪 Using PR number from workflow_dispatch input: ${{ inputs.pr_number }}"
+          else
+            echo "❌ No PR number found in event or inputs. Skipping."
+            exit 0
+          fi
+
+      - name: Debug Show PR details
+        run: |
+          echo "🔍 Viewing PR #${{ steps.determine-pr.outputs.PR_NUMBER }}"
+          gh pr view ${{ steps.determine-pr.outputs.PR_NUMBER }} \
+            --json number,title,state,mergeable,headRefName,baseRefName,author,labels,isCrossRepository \
+            --jq '.'
         env:
-          GH_TOKEN: ${{ secrets.UPSTREAM_GH_TOKEN }}   
+          GH_TOKEN: ${{ secrets.UPSTREAM_GH_TOKEN }}
+
+      - name: Try manual merge by PR number
+        if: github.event_name == 'workflow_dispatch' && inputs.pr_number != ''
+        run: |
+          echo "🔢 Attempting to merge PR #${{ inputs.pr_number }}"
           
-      - name: Show repo owner
+          gh pr merge ${{ inputs.pr_number }} \
+            --squash \
+            --delete-branch \
+            --subject "Auto-merged PR #${{ inputs.pr_number }}" \
+            --body "Auto-merged via manual workflow_dispatch trigger"
         env:
-          OWNER: ${{ github.repository_owner }}
-        run: echo "$OWNER"
-        
-      # - name: Auto-merge PRs from trusted sources
-      #   uses: pascalgn/automerge-action@v0.15.6
-      #   env:
-      #     GITHUB_TOKEN : ${{ secrets.UPSTREAM_GH_TOKEN }}  # Or secrets.GITHUB_TOKEN
-      #     MERGE_METHOD: squash
-      #     MERGE_COMMIT_MESSAGE: pull-request-title
-      #     AUTHOR_EMAIL: bot@github.com
-      #     AUTHOR_NAME: Auto Merge Bot
-      #     ALLOW_FORKS: false # ⚠️ Strongly recommended: disallow fork merges unless you handle validation
-      #     REVIEWERS: '' # No reviewers required
-      #     BLOCKING_LABELS: do-not-merge
-      #     REQUIRED_LABELS: automerge
+          GH_TOKEN: ${{ secrets.UPSTREAM_GH_TOKEN }}
+
+      - name: Auto-merge PR
+        uses: pascalgn/automerge-action@v0.15.6
+        env:
+          GITHUB_TOKEN: ${{ secrets.UPSTREAM_GH_TOKEN }}
+          MERGE_METHOD: squash
+          MERGE_COMMIT_MESSAGE: pull-request-title
+          AUTHOR_NAME: Auto Merge Bot
+          AUTHOR_EMAIL: bot@github.com
+          REQUIRED_LABELS: automerge
+          BLOCKING_LABELS: do-not-merge
+          ALLOW_FORKS: true  # ⚠️ Set to false if you want to block fork-based merges
